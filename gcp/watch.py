@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from datetime import datetime
+
 load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 PROJECT_ID = os.getenv('GCP_PROJECT_ID')
@@ -26,7 +28,7 @@ def start_watch():
     
     res = service.users().watch(userId='me', body=request).execute()
     print(f"Watch response: {res}")
-    print(f"Expiration: {res.get('expiration')}")
+    print(f"Expiration: {datetime.fromtimestamp(res.get('expiration') / 1000.0)}")
     print(f"History ID: {res.get('historyId')}")
 
 if __name__ == '__main__':
