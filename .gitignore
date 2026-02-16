@@ -1,4 +1,5 @@
 gcp/credentials.json
+gcp/token.json
 .env
 
 venv/
