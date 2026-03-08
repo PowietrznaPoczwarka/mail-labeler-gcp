@@ -28,7 +28,7 @@ def start_watch():
     
     res = service.users().watch(userId='me', body=request).execute()
     print(f"Watch response: {res}")
-    print(f"Expiration: {datetime.fromtimestamp(res.get('expiration') / 1000.0)}")
+    print(f"Expiration: {datetime.fromtimestamp(float(res.get('expiration')) / 1000.0)}")
     print(f"History ID: {res.get('historyId')}")
 
 if __name__ == '__main__':
