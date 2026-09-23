@@ -10,7 +10,8 @@ Requirements:
 
 Soft requirements:
 - Access to some kind of LLM (or *something else* that can label emails based text/content for your own specific labels; can be a black box). I am using deepseek API in this project.
-
+- *something else* can be a ML classifying model trained on embedded email content (using some kind of embedding model)
+- or hyped Jev model (TypeSafe AI) 
 
 ### Setting up GCP project:
 

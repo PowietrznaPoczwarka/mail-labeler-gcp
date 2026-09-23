@@ -3,3 +3,7 @@ gcp/token.json
 .env
 
 venv/
+logs/
+
+*.jsonl
+*.pkl

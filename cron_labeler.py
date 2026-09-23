@@ -1,18 +1,26 @@
 import os.path
 import base64
 import re
+import logging
 from bs4 import BeautifulSoup
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+logger = logging.getLogger("cron_labeler")
+logger.setLevel(logging.INFO)
+file_handler = logging.FileHandler("logs/cron_labeler.log")
+formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
 # Scopes needed for Gmail API
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
-# Use the labels seen in the notebook
-PROCESSED_LABEL_ID = 'Label_4550656612000604041' # 'temp3 - processed'
-MOCK_CATEGORY_LABEL_ID = 'Label_6075941912103430332' # 'temp2 - okay'
+PROCESSED_LABEL_ID = 'Label_4550656612000604041' # processed
+MOCK_CATEGORY_LABEL_ID = 'Label_6075941912103430332' # temp
+UNPROCESSABLE_LABEL_ID = 'Label_4239649511002813377' # unprocessable
 
 def get_service():
     """Authenticates and returns the Gmail API service."""
@@ -87,13 +95,22 @@ def get_email_text(payload):
 
     return text_content
 
+def should_classify(subject, sender, size_estimate):
+    """
+    Filtering function based on subject, sender, and size estimate.
+    Currently judges only by size_estimate: skips classification if > 50000.
+    """
+    if size_estimate is not None and size_estimate > 50000:
+        return False
+    return True
+
 def mock_blackbox_classify(subject, sender, text_content):
     """
     Mock classification function.
     In reality, this would call an LLM (e.g. Deepseek)
     and return the determined label ID based on content.
     """
-    print(f"  [Mock] Classifying email '{subject}' from {sender}...")
+    logger.info("Classifying email '%s' from %s", subject, sender)
     # Just returning a mock category label for now
     return MOCK_CATEGORY_LABEL_ID
 
@@ -104,16 +121,13 @@ def process_emails(service):
     """
     # Gmail search syntax: newer_than:1d
     query = "newer_than:1d"
-
-    print(f"Searching for messages with query: '{query}'")
     results = service.users().messages().list(userId='me', q=query).execute()
     messages = results.get('messages', [])
+    logger.info("Found %d new emails in search results with query '%s'", len(messages), query)
 
     if not messages:
-        print("No new messages found.")
+        logger.info("Done processing. 0 messages processed.")
         return
-
-    print(f"Found {len(messages)} messages in the search results.")
 
     processed_count = 0
     for msg_meta in messages:
@@ -126,42 +140,30 @@ def process_emails(service):
         if PROCESSED_LABEL_ID in label_ids:
             continue
 
-        print(f"\nProcessing message ID: {msg_id}")
-
-        headers = msg['payload']['headers']
+        headers = msg.get('payload', {}).get('headers', [])
         subject = next((h['value'] for h in headers if h['name'] == 'Subject'), "No Subject")
         sender = next((h['value'] for h in headers if h['name'] == 'From'), "Unknown Sender")
+        size_estimate = msg.get('sizeEstimate')
 
-        print(f"  Subject: {subject}")
-        print(f"  From: {sender}")
+        if not should_classify(subject, sender, size_estimate):
+            logger.info("Processed message %s: skipped classification (size_estimate: %s), applied unprocessable label", msg_id, size_estimate)
+            body = {'addLabelIds': [PROCESSED_LABEL_ID, UNPROCESSABLE_LABEL_ID]}
+        else:
+            # Extract and clean text
+            raw_text = get_email_text(msg.get('payload', {}))
+            cleaned_text = clean_email_body(raw_text)
+            category_label_id = mock_blackbox_classify(subject, sender, cleaned_text)
+            body = {'addLabelIds': [PROCESSED_LABEL_ID, category_label_id]}
+            logger.info("Processed message %s: classified with label %s", msg_id, category_label_id)
 
-        # Extract and clean text
-        raw_text = get_email_text(msg['payload'])
-        cleaned_text = clean_email_body(raw_text)
-
-        # Determine category label using the blackbox function
-        category_label_id = mock_blackbox_classify(subject, sender, cleaned_text)
-
-        # Apply labels (category and "LLM Processed")
-        body = {
-            'addLabelIds': [PROCESSED_LABEL_ID, category_label_id]
-        }
-
-        print(f"  Applying labels: {body['addLabelIds']}")
-        service.users().messages().modify(
-            userId='me',
-            id=msg_id,
-            body=body
-        ).execute()
-
+        service.users().messages().modify(userId='me', id=msg_id, body=body).execute()
         processed_count += 1
-
-    print(f"\nDone! Processed and labeled {processed_count} new messages.")
+    logger.info("Done processing. Processed %d messages.", processed_count)
 
 if __name__ == '__main__':
-    print("Starting cron labeler...")
+    logger.info("Starting cron labeler...")
     try:
         service = get_service()
         process_emails(service)
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.exception("An error occurred: %s", e)
