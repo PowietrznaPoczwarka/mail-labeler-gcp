@@ -8,6 +8,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from typesafe_sdk import Choice, TypeSafeClient
+
 logger = logging.getLogger("cron_labeler")
 logger.setLevel(logging.INFO)
 file_handler = logging.FileHandler("logs/cron_labeler.log")
@@ -18,9 +20,16 @@ logger.addHandler(file_handler)
 # Scopes needed for Gmail API
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
-PROCESSED_LABEL_ID = 'Label_4550656612000604041' # processed
-MOCK_CATEGORY_LABEL_ID = 'Label_6075941912103430332' # temp
-UNPROCESSABLE_LABEL_ID = 'Label_4239649511002813377' # unprocessable
+LABEL_IDS = {
+    'IMPORTANT': 'Label_191074900200250148', # 👹 Pilne/Ważne
+    'SPAM': 'Label_1970431896466590113', # 🤢 Spam
+    'AWAITING_RESPONSE': 'Label_3347196074444027717', # 🎃 Do odpowiedzi
+    'OTHER': 'Label_3725959684110416048', # 👽 Inne
+    'SUBSCRIPTIONS': 'Label_9020177853318762020', # 🫥 Subskrypcje/Info/Oferty
+    'UNPROCESSABLE': 'Label_4239649511002813377', # unprocessable
+    'PROCESSED': 'Label_4550656612000604041', # processed
+    'MOCK': 'Label_6075941912103430332', # temp
+}
 
 def get_service():
     """Authenticates and returns the Gmail API service."""
@@ -42,7 +51,6 @@ def get_service():
 def clean_email_body(raw_content):
     """
     Removes HTML, CSS, hidden characters, shortens URLs.
-    Based on the logic in untitled.ipynb.
     """
     if not raw_content:
         return ""
@@ -96,9 +104,9 @@ def get_email_text(payload):
     return text_content
 
 def should_classify(subject, sender, size_estimate):
+    # TODO implement filtering based on subject and sender
     """
-    Filtering function based on subject, sender, and size estimate.
-    Currently judges only by size_estimate: skips classification if > 50000.
+    Filtering function based on subject, sender, and size estimate. Currently judges only by size_estimate: skips classification if > 50000.
     """
     if size_estimate is not None and size_estimate > 50000:
         return False
@@ -106,18 +114,46 @@ def should_classify(subject, sender, size_estimate):
 
 def mock_blackbox_classify(subject, sender, text_content):
     """
-    Mock classification function.
-    In reality, this would call an LLM (e.g. Deepseek)
-    and return the determined label ID based on content.
+    Mock classification function. In reality, this would call a classification model (or LLM?) and return the determined label ID based on content.
     """
     logger.info("Classifying email '%s' from %s", subject, sender)
     # Just returning a mock category label for now
-    return MOCK_CATEGORY_LABEL_ID
+    return LABEL_IDS['MOCK']
+
+def classify_email_jev(subject, sender, text_content):
+    """
+    Classifies an email using TypeSafe's Jev AI model and returns the corresponding label ID.
+    """
+    logger.info("Classifying email '%s' from %s", subject, sender)
+    email_context = f"Sender: {sender}\nSubject: {subject}\n\nEmail Body:\n{text_content}"
+    
+    try:
+        with TypeSafeClient() as client:
+            response = client.system_one(
+                state=email_context,
+                questions={
+                    "category": Choice(
+                        instructions="Categorize this email into one of the available groups.",
+                        criteria={
+                            "IMPORTANT": "Important emails I should read and pay attention to (but not necessarily answer).",
+                            "SPAM": "Spam emails, unwanted junk, scams.",
+                            "AWAITING_RESPONSE": "Emails that explicitly expect me to answer, reply, or take action.",
+                            "SUBSCRIPTIONS": "Boring stuff, newsletters, repeated notifications, automated updates, or promotional offers.",
+                            "OTHER": "Any email that does not fit into the other categories.",
+                        },
+                    ),
+                },
+            )
+        chosen_category = response.answers["category"].choice
+        return LABEL_IDS.get(chosen_category, LABEL_IDS['OTHER'])
+        
+    except Exception as e:
+        logger.error("Error during TypeSafe classification for email '%s': %s", subject, str(e))
+        return LABEL_IDS['UNPROCESSABLE']
 
 def process_emails(service):
     """
-    Fetches emails from the last 24 hours, filters out already processed ones,
-    extracts their text, categorizes them, and applies labels.
+    Fetches emails from the last 24 hours, filters out already processed ones, extracts text, categorizes, and applies labels.
     """
     # Gmail search syntax: newer_than:1d
     query = "newer_than:1d"
@@ -133,11 +169,10 @@ def process_emails(service):
     for msg_meta in messages:
         msg_id = msg_meta['id']
         msg = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
-
         label_ids = msg.get('labelIds', [])
 
         # Skip if already processed
-        if PROCESSED_LABEL_ID in label_ids:
+        if LABEL_IDS['PROCESSED'] in label_ids:
             continue
 
         headers = msg.get('payload', {}).get('headers', [])
@@ -147,13 +182,14 @@ def process_emails(service):
 
         if not should_classify(subject, sender, size_estimate):
             logger.info("Processed message %s: skipped classification (size_estimate: %s), applied unprocessable label", msg_id, size_estimate)
-            body = {'addLabelIds': [PROCESSED_LABEL_ID, UNPROCESSABLE_LABEL_ID]}
+            body = {'addLabelIds': [LABEL_IDS['PROCESSED'], LABEL_IDS['UNPROCESSABLE']]}
         else:
             # Extract and clean text
             raw_text = get_email_text(msg.get('payload', {}))
             cleaned_text = clean_email_body(raw_text)
-            category_label_id = mock_blackbox_classify(subject, sender, cleaned_text)
-            body = {'addLabelIds': [PROCESSED_LABEL_ID, category_label_id]}
+            # category_label_id = mock_blackbox_classify(subject, sender, cleaned_text)
+            category_label_id = classify_email_jev(subject, sender, cleaned_text)
+            body = {'addLabelIds': [LABEL_IDS['PROCESSED'], category_label_id]}
             logger.info("Processed message %s: classified with label %s", msg_id, category_label_id)
 
         service.users().messages().modify(userId='me', id=msg_id, body=body).execute()

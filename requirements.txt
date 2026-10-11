@@ -1,0 +1,13 @@
+# reqs
+beautifulsoup4
+google-api-python-client
+google-auth
+google-auth-oauthlib
+python-dotenv
+numpy
+typesafe-sdk
+
+# Optional for ML
+# sentence-transformers
+# scikit-learn
+# matplotlib
